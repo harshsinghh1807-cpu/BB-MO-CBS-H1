@@ -1,8 +1,12 @@
-# Binary Branching Multi-Objective Conflict-Based Search (BB-MO-CBS)
+# Binary Branching Multi-Objective Conflict-Based Search with Heuristics (BB-MO-CBS-H1)
 
-This repository provides C++ Implementation of the Binary Branching Multi-Objective Conflict-Based Search (BB-MO-CBS) algorithm [1] for Multi-Objective Multi-Agent Path Finding problem. This project is still under active development. 
+This repository provides a C++ Implementation of the Binary Branching Multi-Objective Conflict-Based Search with Heuristic Bounding Sets (BB-MO-CBS-H1) algorithm [1] for the Multi-Objective Multi-Agent Path Finding (MOMAPF) problem.
 
-BB-MO-CBS is a successor of our prior MO-CBS [2], whose repo can be found [here](https://github.com/wonderren/public_cppmomapf).
+### Algorithm Highlights
+- **Conflict Analysis & Cardinal Conflict Selection (Algorithm 6)**: Analyzes agent conflict pairs to compute cost increments $\Delta_x[o] = \max(0, s - \text{Ideal}_o)$ for each objective using single-objective cheapest path search under constraints. Identifies cardinal pairs and forms subset $M$ of size up to $K$.
+- **Heuristic Bounding Sets ($Full_k, S_k, S_l$)**: Computes $2^{|M|}$ combinations of bounding vectors, extracts non-dominated bounds $S_k$, and prunes dominated high-level nodes using known solutions $C$.
+- **Lexicographical Key Updating**: Dynamically updates search keys $key' = \text{lexmax}(g_{k,rep}, \text{lexmin}(S_k))$ and pushes back to OPEN if bounded cost increases.
+- **Child Pruning (Line 29)**: Computes child side bounding set $S_l$ and skips low-level searches entirely if $S_l$ is covered by $C$.
 
 The code is distributed for academic and non-commercial use.
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR

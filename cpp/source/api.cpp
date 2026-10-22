@@ -35,12 +35,13 @@ int RunMOCBS(
 int RunBBMOCBS(
   basic::GridkConn& g, std::vector<long>& starts, std::vector<long>& goals,
   mapf::MOMAPFResult* res, double time_limit,
-  std::vector<long> wait_cost, int mode)
+  std::vector<long> wait_cost, int mode, int K)
 {
 
   mapf::NBMOCBS_EMOA* planner;
   if (mode == 0) {
     planner = new mapf::NBMOCBS_EMOA();
+    planner->SetK(K);
   }else{
     std::cout << "[ERROR] RunBBMOCBS, unknown planner mode" << mode << std::endl;
     throw std::runtime_error("[ERROR]");

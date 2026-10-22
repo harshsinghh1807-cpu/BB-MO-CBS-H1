@@ -26,7 +26,7 @@ int RunMOCBS(
 int RunBBMOCBS(
   basic::GridkConn& g, std::vector<long>& starts, std::vector<long>& goals,
   mapf::MOMAPFResult* res, double time_limit=300,
-  std::vector<long> wait_cost=std::vector<long>(), int mode = 0) ;
+  std::vector<long> wait_cost=std::vector<long>(), int mode = 0, int K = 1) ;
 
 }
 }

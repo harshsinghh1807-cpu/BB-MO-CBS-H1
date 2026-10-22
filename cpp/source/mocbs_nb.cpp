@@ -11,9 +11,68 @@
 // #define __MY_COMPILE_NONDOM_SORT__ false // for comparison, should nenver bve used in practice.
 #define __MY_COMPILE_NONDOM_SORT__ true
 
+#include <queue>
+#include <tuple>
+#include <unordered_set>
+
 namespace rzq{
 namespace mapf{
 
+bool LexLess(const basic::CostVector& a, const basic::CostVector& b) {
+  size_t d = std::min(a.size(), b.size());
+  for (size_t i = 0; i < d; i++) {
+    if (a[i] < b[i]) return true;
+    if (a[i] > b[i]) return false;
+  }
+  return a.size() < b.size();
+}
+
+basic::CostVector LexMin(const basic::CostVector& a, const basic::CostVector& b) {
+  return LexLess(a, b) ? a : b;
+}
+
+basic::CostVector LexMax(const basic::CostVector& a, const basic::CostVector& b) {
+  return LexLess(a, b) ? b : a;
+}
+
+void NonDomVectors(const std::vector<basic::CostVector>& in, std::vector<basic::CostVector>& out) {
+  out.clear();
+  for (size_t i = 0; i < in.size(); i++) {
+    bool dominated = false;
+    for (size_t j = 0; j < in.size(); j++) {
+      if (i == j) continue;
+      if (search::EpsDominance(in[j], in[i])) {
+        if (in[j] == in[i]) {
+          if (j < i) {
+            dominated = true;
+            break;
+          }
+        } else {
+          dominated = true;
+          break;
+        }
+      }
+    }
+    if (!dominated) {
+      out.push_back(in[i]);
+    }
+  }
+}
+
+bool IsCoveredBy(const std::vector<basic::CostVector>& S, const std::unordered_map<long, basic::CostVector>& C) {
+  if (S.empty()) return false;
+  for (const auto& s : S) {
+    bool covered = false;
+    for (const auto& c_item : C) {
+      if (search::EpsDominance(c_item.second, s)) {
+        covered = true;
+        break;
+      }
+    }
+    if (!covered) return false;
+  }
+  return true;
+}
 
 std::ostream& operator<<(std::ostream& os, const CostIndexCombo& n)
 {
@@ -220,26 +279,23 @@ void NBCBSNode::printPF() {
 
 bool NBCBSNode::solFilter(std::unordered_map< long, basic::CostVector >& sol_costs)
 {
-  auto iter = sorted_costIndex.begin();
   bool ret_flag = false;
-  while (iter != sorted_costIndex.end()) {
-    // loop from the first
-    bool erased = false;
+  while (!sorted_costIndex.empty()) {
+    bool dom = false;
     for (auto& item2: sol_costs) {
-      if (search::EpsDominance(item2.second, iter->first)) {
-        iter = sorted_costIndex.erase(iter);
-        erased = true;
-        ret_flag = true;
+      if (search::EpsDominance(item2.second, sorted_costIndex.front().first)) {
+        dom = true;
         break;
       }
     }
-    if (!erased) {
-      iter++;
+    if (dom) {
+      sorted_costIndex.pop_front();
+      ret_flag = true;
     }
     else {
-      break; // stop at the first non-dom one, which will be set as the representative, no need to run further filtering.
+      break; // stop at the first non-dom one (Algorithm 3)
     }
-  } // end while
+  }
   return ret_flag;
 };
 
@@ -284,7 +340,7 @@ NBMOCBS_EMOA::NBMOCBS_EMOA() {
 NBMOCBS_EMOA::~NBMOCBS_EMOA() {};
 
 void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, double time_limit, double eps) {
-  std::cout << "***BB-MO-CBS search starts***" << std::endl;
+  std::cout << "***BB-MO-CBS-H1 search starts***" << std::endl;
   // assign graph pointer here.
   for (int ri = 0; ri < _nAgent; ri++){
     SetGraphPtr(ri, _nAgent, &(_tempAgentGrids[ri]), _agentCosts[ri]);
@@ -311,11 +367,11 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
   _tlimit = time_limit;
   _t0 = std::chrono::steady_clock::now(); // for timing.
 
-  // init
+  // Line 1-3: Init (P_o, OPEN with g_o,rep, C = empty)
   _Init();
   _result.find_all_pareto = false;
 
-  // main search loop
+  // Line 4: while OPEN is not empty do
   size_t iterCount__ = 0;
   while ( true ) {
     iterCount__++;
@@ -324,43 +380,62 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
         << iterCount__ << " ------------------------" << std::endl;
     }
 
-    //// select high-level node, lexicographic order
+    // Line 5: P_k <- OPEN.pop (smallest key)
     NBCBSNode *node = _PopNode();
-    //// see if open depletes and there is no more node.
     if (!node) {
       _result.find_all_pareto = true;
       break; // terminates
     }
 
-    //// filtering step.
+    // Line 6: \Pi_k <- DomPrune(C, \Pi_k)
     bool ret_flag = node->solFilter(_result.costs);
-    if (ret_flag) { // at least one vector is filtered.
+
+    // Line 7: if any joint path in \Pi_k is filtered then
+    if (ret_flag) {
+      node->clearCachedAnalysis();
+      // Line 8: if \Pi_k != empty then
       if (!node->isEmptyPlans()) {
         bool flag = node->setRep();
         if (!flag) {
           std::cout << "[DEBUG] * NBMOCBS_EMOA::Search, fail to set Rep for node " << (*node) << std::endl;
           return ;
         }
-        _open.insert( std::make_pair(node->rep_cvec, node->id) );
-      }else{
-        // do nothing, this node has empty plan.
+        // Line 9-10: \pi_k,rep <- \Pi_k.first, g_k,rep <- g(\pi_k,rep), add P_k to OPEN with key g_k,rep
+        node->key = node->rep_cvec;
+        _open.insert( std::make_pair(node->key, node->id) );
       }
+      // Line 11: continue
       continue;
     }
 
-    //// detect and select conflict
+    // Line 12: cft <- DetectConflict(\pi_k,rep)
     auto cft = _DetectAndSelectConflict(node);
 
-    //// new solution
+    // Line 13: if cft = NULL then
     if (!cft.IsValid()) {
-      // find a conflict-free solution. add it to the result.
+      // Line 14: add g_k,rep to C
       _UpdateSolution(node);
-      _open.insert( std::make_pair(node->rep_cvec, node->id) );
-      continue; // end this iteration
+
+      // Line 15: delete \pi_k,rep from \Pi_k
+      if (!node->sorted_costIndex.empty()) {
+        node->sorted_costIndex.erase(node->sorted_costIndex.begin());
+      }
+      node->clearCachedAnalysis();
+
+      // Line 16: if \Pi_k != empty then
+      if (!node->isEmptyPlans()) {
+        bool flag = node->setRep();
+        if (flag) {
+          // Line 17-18: \pi_k,rep <- \Pi_k.first, g_k,rep <- g(\pi_k,rep), add P_k to OPEN with key g_k,rep
+          node->key = node->rep_cvec;
+          _open.insert( std::make_pair(node->key, node->id) );
+        }
+      }
+      // Line 19: continue
+      continue;
     }
 
-    _cfts.push_back(cft); // @2022-10-31 This is just to count duplicated conflicts.
-                          // It can be removed without affecting the correctness of the algorithm.
+    _cfts.push_back(cft);
 
     if ( _IfTimeout() ) {
       std::cout << "[INFO] * BBMOCBS_EMOA::Search Timeout, reach limit " << _tlimit << std::endl;
@@ -370,19 +445,117 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
       std::cout << "[INFO] * BBMOCBS_EMOA::Search, after " << _result.n_expanded << " conflict splits " << std::endl;
     }
 
-    //// split conflict (i.e. expand *node )
-    auto cstrs = cft.Split();
-    for (auto cstr: cstrs) { // loop over both constraints.
-      _Lsearch(cstr.i, node, &cstr);
+    // Lines 20-25: Conflict Analysis and Heuristics
+    CBSConflict cft_star;
+    std::vector<std::pair<int, int>> M;
+    std::unordered_map<int, basic::CostVector> delta;
+    std::vector<std::pair<basic::CostVector, int>> Full_k_pairs;
+    std::vector<basic::CostVector> S_k;
+    basic::CostVector key_prime;
+
+    if (node->has_cached_analysis) {
+      cft_star = node->cached_cft;
+      M = node->cached_M;
+      delta = node->cached_delta;
+      Full_k_pairs = node->cached_Full_k;
+      S_k = node->cached_S_k;
+      key_prime = node->cached_key_prime;
+    } else {
+      // Line 20: (cft*, M, \Delta) <- ConflictAnalysis(P_k, \pi_k,rep, K)
+      _ConflictAnalysis(node, _K, &cft_star, &M, &delta);
+
+      // Line 21: Full_k <- { A_k + \sum over pairs (a,b) in M of \Delta_x : x chosen from {a,b} per pair }
+      int m = M.size();
+      int num_combinations = (m > 0) ? (1 << m) : 1;
+      std::vector<basic::CostVector> full_k_vecs;
+      for (int mask = 0; mask < num_combinations; mask++) {
+        basic::CostVector w = node->rep_cvec;
+        for (int p = 0; p < m; p++) {
+          int choice = (mask & (1 << p)) ? M[p].second : M[p].first;
+          w = w + delta[choice];
+        }
+        Full_k_pairs.push_back(std::make_pair(w, mask));
+        full_k_vecs.push_back(w);
+      }
+
+      // Line 22: S_k <- ND(Full_k)
+      NonDomVectors(full_k_vecs, S_k);
+
+      // Line 23: key' <- lexmax( g_k,rep , lexmin(S_k) )
+      basic::CostVector lexmin_Sk = S_k.empty() ? node->rep_cvec : S_k[0];
+      for (size_t s_idx = 1; s_idx < S_k.size(); s_idx++) {
+        if (LexLess(S_k[s_idx], lexmin_Sk)) {
+          lexmin_Sk = S_k[s_idx];
+        }
+      }
+      key_prime = LexMax(node->rep_cvec, lexmin_Sk);
+
+      // Cache on node
+      node->has_cached_analysis = true;
+      node->cached_cft = cft_star;
+      node->cached_M = M;
+      node->cached_delta = delta;
+      node->cached_Full_k = Full_k_pairs;
+      node->cached_S_k = S_k;
+      node->cached_key_prime = key_prime;
+    }
+
+    // Line 24: if key' >_lex key(P_k) then add P_k to OPEN with key'; continue
+    if (LexLess(node->key, key_prime)) {
+      node->key = key_prime;
+      _open.insert( std::make_pair(node->key, node->id) );
+      continue;
+    }
+
+    // Line 25: if S_k is covered by C then discard P_k; continue
+    if (IsCoveredBy(S_k, _result.costs)) {
+      continue; // discard P_k
+    }
+
+    // Line 26: {w^i, w^j} <- GenerateConstraints(cft*) where cft* is a conflict of agents i and j
+    auto cstrs = cft_star.Split();
+
+    // Line 27: for all i' in {i, j} do
+    for (auto cstr: cstrs) {
+      int i_prime = cstr.i;
+
+      // Line 28: S_l <- ND{ w in Full_k : pair (i,j) takes side i' }
+      std::vector<basic::CostVector> side_vecs;
+      if (!M.empty()) {
+        for (const auto& item : Full_k_pairs) {
+          int choice = (item.second & 1) ? M[0].second : M[0].first;
+          if (choice == i_prime) {
+            side_vecs.push_back(item.first);
+          }
+        }
+      }
+      std::vector<basic::CostVector> S_l;
+      if (!side_vecs.empty()) {
+        NonDomVectors(side_vecs, S_l);
+      } else {
+        S_l = S_k;
+      }
+
+      // Line 29: if S_l is covered by C then continue (skip child, no low-level search)
+      if (IsCoveredBy(S_l, _result.costs)) {
+        continue;
+      }
+
+      // Lines 30-38: LowLevelSearch, NonDomJointPath, key(P_l), and add to OPEN
+      _LsearchWithHeuristic(i_prime, node, &cstr, S_l);
     }
     _result.n_expanded++; // # conflict resolved.
   } // end while loop
 
   auto tnow = std::chrono::steady_clock::now(); // for timing.
   _result.rt_search = std::chrono::duration<double>(tnow - _t0).count();  
-  _result.n_branch = _result.n_branch / _result.n_expanded; // average branching factor.
+  if (_result.n_expanded > 0) {
+    _result.n_branch = _result.n_branch / _result.n_expanded; // average branching factor.
+  }
 
-  _result.others[0] = _result.others[0] / _result.others[1]; // get the averaged runtime for computeSortedPF().
+  if (_result.others[1] > 0) {
+    _result.others[0] = _result.others[0] / _result.others[1]; // get the averaged runtime for computeSortedPF().
+  }
 
   _CountDupConflict();
 
@@ -397,6 +570,16 @@ bool NBMOCBS_EMOA::_Init() {
 
   auto init_t0 = std::chrono::steady_clock::now(); // for timing.
   _result.n_expandLow = 0.0;
+
+  // Precompute single-objective heuristic scans
+  _single_dijks.resize(_nAgent);
+  for (int ri = 0; ri < _nAgent; ri++) {
+    _single_dijks[ri].resize(_cdim);
+    for (size_t o = 0; o < _cdim; o++) {
+      _single_dijks[ri][o].SetGraphPtr(&(_tempAgentGrids[ri]));
+      _single_dijks[ri][o].Search(_vd[ri], o);
+    }
+  }
 
   //// create the first root node. output via a pointer to that root node.
   long nid = _GenNodeId();
@@ -435,7 +618,10 @@ bool NBMOCBS_EMOA::_Init() {
     return false;
   }
 
-  _open.insert( std::make_pair(out->rep_cvec, out->id) );
+  // Line 2: add P_o to OPEN with key g_o,rep
+  out->key = out->rep_cvec;
+  out->has_cached_analysis = false;
+  _open.insert( std::make_pair(out->key, out->id) );
   _result.n_generated++; // update
 
   if (DEBUG_MOCBS > 0) {
@@ -499,13 +685,308 @@ bool NBMOCBS_EMOA::_GetAllCstr(int ri, NBCBSNode *in, std::vector<CBSConstraint*
 };
 
 
-int NBMOCBS_EMOA::_Lsearch(int ri, NBCBSNode* n, CBSConstraint* cp)
+long NBMOCBS_EMOA::_SingleObjCheapestPath(int ri, size_t obj, const std::vector<CBSConstraint*>& cstrs)
+{
+  basic::GridkConn& g = _tempAgentGrids[ri];
+  long vo = _vo[ri];
+  long vd = _vd[ri];
+
+  std::unordered_set<std::string> node_cstrs;
+  std::unordered_set<std::string> edge_cstrs;
+  long last_nc_t = -1;
+  for (auto cstr : cstrs) {
+    if (!cstr->IsValid()) continue;
+    if (cstr->IsNodeCstr()) {
+      node_cstrs.insert(std::to_string(cstr->vi) + "@" + std::to_string(cstr->ta));
+      if (cstr->ta > last_nc_t) last_nc_t = cstr->ta;
+    } else if (cstr->IsEdgeCstr()) {
+      edge_cstrs.insert(std::to_string(cstr->vi) + "->" + std::to_string(cstr->vj) + "@" + std::to_string(cstr->ta));
+      if (cstr->ta > last_nc_t) last_nc_t = cstr->ta;
+    }
+  }
+
+  // Priority queue for A* (f, g, v, t)
+  typedef std::tuple<long, long, long, long> STNode;
+  std::priority_queue<STNode, std::vector<STNode>, std::greater<STNode>> open;
+
+  std::unordered_map<std::string, long> best_g;
+
+  long h0 = 0;
+  if ((size_t)ri < _single_dijks.size() && obj < _single_dijks[ri].size()) {
+    h0 = _single_dijks[ri][obj].GetCost(vo);
+    if (h0 < 0) h0 = 0;
+  }
+
+  open.push(std::make_tuple(h0, 0L, vo, 0L));
+  best_g[std::to_string(vo) + "@" + std::to_string(0)] = 0L;
+
+  long max_t_limit = (last_nc_t > 0 ? last_nc_t : 0) + 500L;
+
+  while (!open.empty()) {
+    auto curr = open.top();
+    open.pop();
+    long g_val = std::get<1>(curr);
+    long v = std::get<2>(curr);
+    long t = std::get<3>(curr);
+
+    std::string state_key = std::to_string(v) + "@" + std::to_string(t);
+    if (best_g.find(state_key) != best_g.end() && g_val > best_g[state_key]) {
+      continue;
+    }
+
+    // Goal condition: at vd and past all constraints
+    if (v == vd && t > last_nc_t) {
+      return g_val;
+    }
+
+    if (t >= max_t_limit) {
+      continue;
+    }
+
+    // Successor 1: Stay in place (wait action)
+    std::string wait_node_key = std::to_string(v) + "@" + std::to_string(t + 1);
+    if (node_cstrs.find(wait_node_key) == node_cstrs.end()) {
+      long wc = (_agentCosts[ri].size() > obj) ? _agentCosts[ri][obj] : g.GetCost(v, v)[obj];
+      long next_g = g_val + wc;
+      long next_h = 0;
+      if ((size_t)ri < _single_dijks.size() && obj < _single_dijks[ri].size()) {
+        next_h = _single_dijks[ri][obj].GetCost(v);
+        if (next_h < 0) next_h = 0;
+      }
+      long next_f = next_g + next_h;
+      if (best_g.find(wait_node_key) == best_g.end() || next_g < best_g[wait_node_key]) {
+        best_g[wait_node_key] = next_g;
+        open.push(std::make_tuple(next_f, next_g, v, t + 1));
+      }
+    }
+
+    // Successor 2: Move to neighbors
+    auto succs = g.GetSuccs(v);
+    for (auto u : succs) {
+      std::string edge_key = std::to_string(v) + "->" + std::to_string(u) + "@" + std::to_string(t);
+      if (edge_cstrs.find(edge_key) != edge_cstrs.end()) {
+        continue;
+      }
+      std::string move_node_key = std::to_string(u) + "@" + std::to_string(t + 1);
+      if (node_cstrs.find(move_node_key) != node_cstrs.end()) {
+        continue;
+      }
+      long ec = g.GetCost(v, u)[obj];
+      long next_g = g_val + ec;
+      long next_h = 0;
+      if ((size_t)ri < _single_dijks.size() && obj < _single_dijks[ri].size()) {
+        next_h = _single_dijks[ri][obj].GetCost(u);
+        if (next_h < 0) next_h = 0;
+      }
+      long next_f = next_g + next_h;
+      if (best_g.find(move_node_key) == best_g.end() || next_g < best_g[move_node_key]) {
+        best_g[move_node_key] = next_g;
+        open.push(std::make_tuple(next_f, next_g, u, t + 1));
+      }
+    }
+  }
+
+  return 1000000000L; // 1e9 unreachable
+};
+
+
+void NBMOCBS_EMOA::_ConflictAnalysis(
+  NBCBSNode* node, int K,
+  CBSConflict* cft_star,
+  std::vector<std::pair<int, int>>* M_out,
+  std::unordered_map<int, basic::CostVector>* delta_out)
+{
+  M_out->clear();
+  delta_out->clear();
+
+  size_t D = _cdim; // number of objectives
+
+  struct PairInfo {
+    int a;
+    int b;
+    CBSConflict cft;
+    basic::CostVector delta_a;
+    basic::CostVector delta_b;
+    bool is_cardinal;
+    basic::CostVector score;
+  };
+
+  std::vector<PairInfo> pair_infos;
+  CBSConflict first_cft;
+  bool found_first_cft = false;
+
+  // 1: for each pair of agents (a, b) whose paths in π_rep conflict do
+  for (int a = 0; a < _nAgent; a++) {
+    for (int b = a + 1; b < _nAgent; b++) {
+      CBSConflict cft_ab = DetectConflict(&(node->rep_jpath.at(a)), &(node->rep_jpath.at(b)));
+      if (!cft_ab.IsValid()) continue;
+      cft_ab.i = a;
+      cft_ab.j = b;
+
+      if (!found_first_cft) {
+        first_cft = cft_ab;
+        found_first_cft = true;
+      }
+
+      // 3: {ω^a, ω^b} ← Split(cft_ab)
+      auto cstrs = cft_ab.Split();
+      CBSConstraint omega_a, omega_b;
+      for (const auto& c : cstrs) {
+        if (c.i == a) omega_a = c;
+        if (c.i == b) omega_b = c;
+      }
+
+      // Existing constraints on a and b
+      std::vector<CBSConstraint*> cstrs_a, cstrs_b;
+      _GetAllCstr(a, node, &cstrs_a);
+      _GetAllCstr(b, node, &cstrs_b);
+      cstrs_a.push_back(&omega_a);
+      cstrs_b.push_back(&omega_b);
+
+      // 4: for x in {a, b} and each objective o = 1..M do
+      // Compute Ideal_o for a and b
+      basic::CostVector ideal_a(1000000000L, D);
+      if (a < (int)node->idvl_costs.size()) {
+        for (const auto& item : node->idvl_costs[a]) {
+          for (size_t o = 0; o < D; o++) {
+            if (item.second[o] < ideal_a[o]) ideal_a[o] = item.second[o];
+          }
+        }
+      }
+      basic::CostVector ideal_b(1000000000L, D);
+      if (b < (int)node->idvl_costs.size()) {
+        for (const auto& item : node->idvl_costs[b]) {
+          for (size_t o = 0; o < D; o++) {
+            if (item.second[o] < ideal_b[o]) ideal_b[o] = item.second[o];
+          }
+        }
+      }
+
+      basic::CostVector delta_a(0L, D);
+      basic::CostVector delta_b(0L, D);
+
+      for (size_t o = 0; o < D; o++) {
+        long s_a = _SingleObjCheapestPath(a, o, cstrs_a);
+        long s_b = _SingleObjCheapestPath(b, o, cstrs_b);
+
+        if (s_a < 100000000L && ideal_a[o] < 100000000L) {
+          delta_a[o] = std::max(0L, s_a - ideal_a[o]);
+        } else if (s_a >= 100000000L) {
+          delta_a[o] = 1000000L;
+        }
+
+        if (s_b < 100000000L && ideal_b[o] < 100000000L) {
+          delta_b[o] = std::max(0L, s_b - ideal_b[o]);
+        } else if (s_b >= 100000000L) {
+          delta_b[o] = 1000000L;
+        }
+      }
+
+      auto is_non_zero = [](const basic::CostVector& d) {
+        for (size_t o = 0; o < d.size(); o++) {
+          if (d[o] > 0) return true;
+        }
+        return false;
+      };
+
+      // 7: pair (a,b) is cardinal if Δ_a ≠ 0 and Δ_b ≠ 0
+      bool is_cardinal = is_non_zero(delta_a) && is_non_zero(delta_b);
+
+      // 8: score(a,b) ← lexmin(Δ_a, Δ_b)
+      basic::CostVector score = LexMin(delta_a, delta_b);
+
+      PairInfo pi;
+      pi.a = a;
+      pi.b = b;
+      pi.cft = cft_ab;
+      pi.delta_a = delta_a;
+      pi.delta_b = delta_b;
+      pi.is_cardinal = is_cardinal;
+      pi.score = score;
+      pair_infos.push_back(pi);
+    }
+  }
+
+  // 9: cft* ← the cardinal pair with the largest score (if none, the first conflict of π_rep)
+  int best_cardinal_idx = -1;
+  for (size_t i = 0; i < pair_infos.size(); i++) {
+    if (pair_infos[i].is_cardinal) {
+      if (best_cardinal_idx == -1 || LexLess(pair_infos[best_cardinal_idx].score, pair_infos[i].score)) {
+        best_cardinal_idx = i;
+      }
+    }
+  }
+
+  std::unordered_set<int> agents_in_M;
+
+  if (best_cardinal_idx != -1) {
+    *cft_star = pair_infos[best_cardinal_idx].cft;
+    M_out->push_back(std::make_pair(cft_star->i, cft_star->j));
+    agents_in_M.insert(cft_star->i);
+    agents_in_M.insert(cft_star->j);
+    (*delta_out)[cft_star->i] = pair_infos[best_cardinal_idx].delta_a;
+    (*delta_out)[cft_star->j] = pair_infos[best_cardinal_idx].delta_b;
+  } else {
+    // If no cardinal pair, use first conflict of π_rep
+    if (found_first_cft) {
+      *cft_star = first_cft;
+    } else {
+      *cft_star = _DetectAndSelectConflict(node);
+    }
+    if (cft_star->IsValid()) {
+      M_out->push_back(std::make_pair(cft_star->i, cft_star->j));
+      agents_in_M.insert(cft_star->i);
+      agents_in_M.insert(cft_star->j);
+
+      bool found_delta = false;
+      for (const auto& pi : pair_infos) {
+        if (pi.a == cft_star->i && pi.b == cft_star->j) {
+          (*delta_out)[cft_star->i] = pi.delta_a;
+          (*delta_out)[cft_star->j] = pi.delta_b;
+          found_delta = true;
+          break;
+        }
+      }
+      if (!found_delta) {
+        (*delta_out)[cft_star->i] = basic::CostVector(0L, D);
+        (*delta_out)[cft_star->j] = basic::CostVector(0L, D);
+      }
+    }
+  }
+
+  // 11: for the other cardinal pairs, in order of decreasing score do
+  // 12:    add the pair to M if neither of its agents is already in M and |M| < K
+  std::vector<PairInfo> other_cardinal;
+  for (size_t i = 0; i < pair_infos.size(); i++) {
+    if (pair_infos[i].is_cardinal && (int)i != best_cardinal_idx) {
+      other_cardinal.push_back(pair_infos[i]);
+    }
+  }
+
+  std::sort(other_cardinal.begin(), other_cardinal.end(), [](const PairInfo& p1, const PairInfo& p2) {
+    return LexLess(p2.score, p1.score); // decreasing score
+  });
+
+  for (const auto& pi : other_cardinal) {
+    if ((int)M_out->size() >= K) break;
+    if (agents_in_M.find(pi.a) == agents_in_M.end() && agents_in_M.find(pi.b) == agents_in_M.end()) {
+      M_out->push_back(std::make_pair(pi.a, pi.b));
+      agents_in_M.insert(pi.a);
+      agents_in_M.insert(pi.b);
+      (*delta_out)[pi.a] = pi.delta_a;
+      (*delta_out)[pi.b] = pi.delta_b;
+    }
+  }
+};
+
+
+int NBMOCBS_EMOA::_LsearchWithHeuristic(
+  int ri, NBCBSNode* n, CBSConstraint* cp, const std::vector<basic::CostVector>& S_l)
 {
   std::vector<CBSConstraint*> cstrs;
   auto retFlag = _GetAllCstr(ri, n, &cstrs);
-  // currently, this retFlag is useless.
+  cstrs.push_back(cp);
 
-  cstrs.push_back(cp); // currently, this pointer is still valid.
   if (DEBUG_MOCBS) {
     std::cout << "[DEBUG] **** NBMOCBS_EMOA::_GetAllCstr" << std::endl;
     for (auto & cstr : cstrs) {
@@ -515,63 +996,80 @@ int NBMOCBS_EMOA::_Lsearch(int ri, NBCBSNode* n, CBSConstraint* cp)
   search::MOSPPResult lowRes;
 
   auto lowFlag = _LsearchPlan(ri, cstrs, &lowRes);
-  // handle different low flag?
-
-  if (DEBUG_MOCBS) {
-    std::cout << "[DEBUG] **** NBMOCBS_EMOA::_Lsearch, result:" << lowRes << std::endl;
+  if (!lowFlag || lowRes.paths.empty()) {
+    return 0;
   }
 
-  //// generate a new HL node, only one.
+  if (DEBUG_MOCBS) {
+    std::cout << "[DEBUG] **** NBMOCBS_EMOA::_LsearchWithHeuristic, result:" << lowRes << std::endl;
+  }
+
   long nid = _GenNodeId();
   _nodes[nid] = *n; // make a copy
   _nodes[nid].id = nid;
   _nodes[nid].parent = n->id;
   _nodes[nid].cstr = *cp; // make a copy
+  _nodes[nid].clearCachedAnalysis();
   
   _nodes[nid].idvl_paths[ri].clear(); // clear old idvl paths of agent-ri.
   _nodes[nid].idvl_costs[ri].clear();
 
-  //// Generate new HL nodes.
   for (const auto& ii : lowRes.paths) { // loop over all idvl paths of agent ri.
     int k = ii.first;
 
-    // enforce unit time path
     std::vector<long> t2;
     std::vector<long> p2;
     UnitTimePath(lowRes.paths[k], lowRes.times[k], &p2, &t2); 
-      // t2 is useless here. always start from t=0;
     _nodes[nid].idvl_paths[ri][k] = p2;
     _nodes[nid].idvl_costs[ri][k] = lowRes.costs[k];
   }
-
-  //// solution filtering
 
   auto tnow = std::chrono::steady_clock::now(); // for timing.  
   _nodes[nid].computeSortedPF();
   _result.others[0] += std::chrono::duration<double>(std::chrono::steady_clock::now()-tnow).count();
   _result.others[1] += 1.0;
-  // _nodes[nid].solFilter(_result.costs); // solution filtering, if no this, the impl is still correct.
+
   if (!_nodes[nid].isEmptyPlans()) {
     bool flag = _nodes[nid].setRep();
     if (!flag) {
       std::cout << "[DEBUG] * NBMOCBS_EMOA::Search, fail to set Rep for node " << _nodes[nid] << std::endl;
       return 0;
     }
-    _open.insert( std::make_pair(_nodes[nid].rep_cvec, nid) );
-    _result.n_generated++; // update, this also include root node.
-    _result.n_branch++; // a new branch. not include root node.
-    if (DEBUG_MOCBS) {
-      std::cout << "[DEBUG] **** NBMOCBS_EMOA::_Lsearch, gen node:" << _nodes[nid] << std::endl;
+
+    // Line 37: key(P_l) <- lexmax( g_l,rep , lexmin(S_l) )
+    basic::CostVector key_Pl = _nodes[nid].rep_cvec;
+    if (!S_l.empty()) {
+      basic::CostVector lexmin_Sl = S_l[0];
+      for (size_t s_idx = 1; s_idx < S_l.size(); s_idx++) {
+        if (LexLess(S_l[s_idx], lexmin_Sl)) {
+          lexmin_Sl = S_l[s_idx];
+        }
+      }
+      key_Pl = LexMax(_nodes[nid].rep_cvec, lexmin_Sl);
     }
-  }else{
+    _nodes[nid].key = key_Pl;
+
+    // Line 38: add P_l to OPEN with key(P_l)
+    _open.insert( std::make_pair(_nodes[nid].key, nid) );
+    _result.n_generated++;
+    _result.n_branch++;
     if (DEBUG_MOCBS) {
-      std::cout << "[DEBUG] **** NBMOCBS_EMOA::_Lsearch, gen empty plan node:" << _nodes[nid] << std::endl;
+      std::cout << "[DEBUG] **** NBMOCBS_EMOA::_LsearchWithHeuristic, gen node:" << _nodes[nid] << std::endl;
+    }
+  } else {
+    if (DEBUG_MOCBS) {
+      std::cout << "[DEBUG] **** NBMOCBS_EMOA::_LsearchWithHeuristic, gen empty plan node:" << _nodes[nid] << std::endl;
     }
   }
 
   return 1;
 };
 
+int NBMOCBS_EMOA::_Lsearch(int ri, NBCBSNode* n, CBSConstraint* cp)
+{
+  std::vector<basic::CostVector> S_l;
+  return _LsearchWithHeuristic(ri, n, cp, S_l);
+};
 
 CBSConflict NBMOCBS_EMOA::_DetectAndSelectConflict(NBCBSNode* n)
 {
