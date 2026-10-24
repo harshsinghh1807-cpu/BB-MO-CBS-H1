@@ -71,6 +71,7 @@ int BOAst::Search(long vo, long vd, double time_limit) {
   auto tstart = std::chrono::steady_clock::now();
   _vo = vo;
   _vd = vd;
+  if (_node_last_t.count(vd) && _node_last_t[vd] > _last_nc_t) { _last_nc_t = _node_last_t[vd]; }
   basic::CostVector zero_vec;
   zero_vec.resize(_graph->GetCostDim(), 0);
   LabelST lo(_GenLabelId(), vo, zero_vec, _Heuristic(_vo), 0); // t = 0 
@@ -199,7 +200,8 @@ void BOAst::AddNodeCstr(long nid, long t) {
   }
   _avl_node[nid].Add(t); // add this unsafe interval.
   // std::cout << " add node cstr = " << nid << " t = " << t << std::endl;
-  if (t > _last_nc_t) {
+  if (_node_last_t.find(nid) == _node_last_t.end() || t > _node_last_t[nid]) { _node_last_t[nid] = t; }
+  if (false) {
     _last_nc_t = t;
     // std::cout << " _last_nc_t is updated to " << _last_nc_t << std::endl;
   }

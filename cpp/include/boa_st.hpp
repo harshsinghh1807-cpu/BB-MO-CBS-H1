@@ -110,6 +110,7 @@ protected:
   std::unordered_map< std::string, FrontierBOA > _alpha; // map a vertex id (v) to alpha(v).
   FrontierBOA _sols; // solution labels.
   long _last_nc_t = -1;
+  std::unordered_map<long,long> _node_last_t; // latest node-constraint time per vertex
   std::unordered_map<long, LabelST> _label;
   std::unordered_map<long, basic::AVLTree<long> > _avl_node;
   std::unordered_map<long, std::unordered_map<long, basic::AVLTree<long> > > _avl_edge;

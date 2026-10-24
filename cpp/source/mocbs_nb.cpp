@@ -4,6 +4,9 @@
  *******************************************/
 
 #include "mocbs_nb.hpp"
+#include <fstream>
+#include <sstream>
+#include <map>
 
 // #define __MY_COMPILE_KUNG_SORT__ false // for comparison, should never be used in practice.
 #define __MY_COMPILE_KUNG_SORT__ true
@@ -11,12 +14,28 @@
 // #define __MY_COMPILE_NONDOM_SORT__ false // for comparison, should nenver bve used in practice.
 #define __MY_COMPILE_NONDOM_SORT__ true
 
+#include <cstdlib>
+#include <iostream>
 #include <queue>
 #include <tuple>
 #include <unordered_set>
 
 namespace rzq{
 namespace mapf{
+
+static std::map<int, std::vector<long> > g_target;
+static bool TgtOK(const std::vector<CBSConstraint*>& cs, int ri) {
+  auto it = g_target.find(ri);
+  if (it == g_target.end()) return false;
+  const std::vector<long>& p = it->second;
+  auto at = [&](long t) { return t < (long)p.size() ? p[t] : p.back(); };
+  for (auto c : cs) {
+    if (!c->IsValid()) continue;
+    if (c->IsNodeCstr()) { if (at(c->ta) == c->vi) return false; }
+    else if (c->IsEdgeCstr()) { if (at(c->ta) == c->vi && at(c->ta + 1) == c->vj) return false; }
+  }
+  return true;
+}
 
 bool LexLess(const basic::CostVector& a, const basic::CostVector& b) {
   size_t d = std::min(a.size(), b.size());
@@ -347,6 +366,21 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
   }
   // set epsilon, by default 0.
   _epsilon = eps;
+  if (getenv("H1_K")) { _K = atoi(getenv("H1_K")); }
+  const bool h1_nocover = (getenv("H1_NOCOVER") != NULL);
+  if (getenv("H1_TARGET")) {
+    std::ifstream fin(getenv("H1_TARGET"));
+    std::string line;
+    while (std::getline(fin, line)) {
+      std::istringstream is(line);
+      int a; long v;
+      if (!(is >> a)) continue;
+      std::vector<long> pth;
+      while (is >> v) pth.push_back(v);
+      g_target[a] = pth;
+    }
+    std::cerr << "[TRACE] loaded target for " << g_target.size() << " agents" << std::endl;
+  }
   _result.others.resize(2); // to store the average runtime for computing Pareto-optimal front.
   _result.others[0] = 0; // total time
   _result.others[1] = 0; // total number of calls
@@ -445,6 +479,22 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
       std::cout << "[INFO] * BBMOCBS_EMOA::Search, after " << _result.n_expanded << " conflict splits " << std::endl;
     }
 
+    if (getenv("H1_PLAIN")) {
+      CBSConflict use = cft;
+      if (getenv("H1_LASTCFT")) {   // pick the conflict of the highest-index agent pair instead
+        bool done = false;
+        for (int a = (int)_nAgent - 2; a >= 0 && !done; a--) {
+          for (int b = (int)_nAgent - 1; b > a && !done; b--) {
+            CBSConflict c2 = DetectConflict(&(node->rep_jpath.at(a)), &(node->rep_jpath.at(b)));
+            if (c2.IsValid()) { c2.i = a; c2.j = b; use = c2; done = true; }
+          }
+        }
+      }
+      auto cs = use.Split();
+      for (auto c : cs) { _Lsearch(c.i, node, &c); }
+      _result.n_expanded++;
+      continue;
+    }
     // Lines 20-25: Conflict Analysis and Heuristics
     CBSConflict cft_star;
     std::vector<std::pair<int, int>> M;
@@ -468,11 +518,23 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
       int m = M.size();
       int num_combinations = (m > 0) ? (1 << m) : 1;
       std::vector<basic::CostVector> full_k_vecs;
+      // FIX: lower bounds must start from the node's ideal point (per objective, the sum over
+      // agents of each agent's cheapest cost). g_k,rep is only exact in objective 1.
+      basic::CostVector base_ideal(0L, _cdim);
+      for (int x = 0; x < (int)_nAgent; x++) {
+        for (size_t o = 0; o < _cdim; o++) {
+          long mn = 1000000000L;
+          for (const auto& itx : node->idvl_costs[x]) {
+            if (itx.second[o] < mn) mn = itx.second[o];
+          }
+          base_ideal[o] += mn;
+        }
+      }
       for (int mask = 0; mask < num_combinations; mask++) {
-        basic::CostVector w = node->rep_cvec;
+        basic::CostVector w = getenv("H1_OLDBASE") ? node->rep_cvec : base_ideal;
         for (int p = 0; p < m; p++) {
           int choice = (mask & (1 << p)) ? M[p].second : M[p].first;
-          w = w + delta[choice];
+          if (!getenv("H1_NODELTA")) w = w + delta[choice];
         }
         Full_k_pairs.push_back(std::make_pair(w, mask));
         full_k_vecs.push_back(w);
@@ -501,19 +563,19 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
     }
 
     // Line 24: if key' >_lex key(P_k) then add P_k to OPEN with key'; continue
-    if (LexLess(node->key, key_prime)) {
+    if (!getenv("H1_NOREKEY") && LexLess(node->key, key_prime)) {
       node->key = key_prime;
       _open.insert( std::make_pair(node->key, node->id) );
       continue;
     }
 
     // Line 25: if S_k is covered by C then discard P_k; continue
-    if (IsCoveredBy(S_k, _result.costs)) {
+    if (!h1_nocover && IsCoveredBy(S_k, _result.costs)) {
       continue; // discard P_k
     }
 
     // Line 26: {w^i, w^j} <- GenerateConstraints(cft*) where cft* is a conflict of agents i and j
-    auto cstrs = cft_star.Split();
+    auto cstrs = (getenv("H1_FIRSTCFT") ? cft : cft_star).Split();
 
     // Line 27: for all i' in {i, j} do
     for (auto cstr: cstrs) {
@@ -537,7 +599,7 @@ void NBMOCBS_EMOA::Search(std::vector<long>& starts, std::vector<long>& goals, d
       }
 
       // Line 29: if S_l is covered by C then continue (skip child, no low-level search)
-      if (IsCoveredBy(S_l, _result.costs)) {
+      if (!h1_nocover && IsCoveredBy(S_l, _result.costs)) {
         continue;
       }
 
@@ -660,6 +722,17 @@ void NBMOCBS_EMOA::_UpdateSolution(NBCBSNode* n) {
   }
 
   // add
+  if (getenv("H1_DUMPSOL")) {
+    std::ofstream fo(getenv("H1_DUMPSOL"), std::ios::app);
+    fo << "SOL";
+    for (size_t o = 0; o < n->rep_cvec.size(); o++) fo << " " << n->rep_cvec[o];
+    fo << "\n";
+    for (auto& itp : n->rep_jpath) {
+      fo << "A " << itp.first;
+      for (auto v : itp.second) fo << " " << v;
+      fo << "\n";
+    }
+  }
   _result.solus[_sol_id_gen] = n->rep_jpath;
   _result.costs[_sol_id_gen] = n->rep_cvec;
   _sol_id_gen++;
@@ -694,10 +767,12 @@ long NBMOCBS_EMOA::_SingleObjCheapestPath(int ri, size_t obj, const std::vector<
   std::unordered_set<std::string> node_cstrs;
   std::unordered_set<std::string> edge_cstrs;
   long last_nc_t = -1;
+  long goal_nc_t = -1;
   for (auto cstr : cstrs) {
     if (!cstr->IsValid()) continue;
     if (cstr->IsNodeCstr()) {
       node_cstrs.insert(std::to_string(cstr->vi) + "@" + std::to_string(cstr->ta));
+      if (cstr->vi == vd && cstr->ta > goal_nc_t) goal_nc_t = cstr->ta;
       if (cstr->ta > last_nc_t) last_nc_t = cstr->ta;
     } else if (cstr->IsEdgeCstr()) {
       edge_cstrs.insert(std::to_string(cstr->vi) + "->" + std::to_string(cstr->vj) + "@" + std::to_string(cstr->ta));
@@ -735,7 +810,7 @@ long NBMOCBS_EMOA::_SingleObjCheapestPath(int ri, size_t obj, const std::vector<
     }
 
     // Goal condition: at vd and past all constraints
-    if (v == vd && t > last_nc_t) {
+    if (v == vd && t > goal_nc_t) {
       return g_val;
     }
 
@@ -996,6 +1071,54 @@ int NBMOCBS_EMOA::_LsearchWithHeuristic(
   search::MOSPPResult lowRes;
 
   auto lowFlag = _LsearchPlan(ri, cstrs, &lowRes);
+  if (!g_target.empty() && TgtOK(cstrs, ri)) {
+    const std::vector<long>& tp = g_target[ri];
+    basic::CostVector tc(0L, _cdim);
+    for (size_t t = 0; t + 1 < tp.size(); t++) {
+      if (tp[t] == tp[t+1]) tc = tc + _agentCosts[ri];
+      else tc = tc + _tempAgentGrids[ri].GetCost(tp[t], tp[t+1]);
+    }
+    bool ok = false;
+    for (const auto& itc : lowRes.costs) {
+      bool le = true;
+      for (size_t o = 0; o < _cdim; o++) { if (itc.second[o] > tc[o]) { le = false; break; } }
+      if (le) { ok = true; break; }
+    }
+    if (!ok) {
+      std::cerr << "*** TARGET LOST at low level: agent " << ri << " target path cost " << tc
+                << " but planner returned " << lowRes.costs.size() << " vectors; cstrs:";
+      for (auto c : cstrs) std::cerr << " (" << c->vi << "," << c->vj << "," << c->ta << ")";
+      std::cerr << std::endl;
+    }
+  }
+  if (getenv("H1_CHECK2")) {   // compare EMOA* with BOA* under identical constraints
+    std::vector< std::vector<long> > ncs, ecs;
+    for (auto c : cstrs) {
+      if (c->IsNodeCstr()) { ncs.push_back(std::vector<long>{c->vi, c->ta}); }
+      else if (c->IsEdgeCstr()) { ecs.push_back(std::vector<long>{c->vi, c->vj, c->ta}); }
+    }
+    search::MOSPPResult boaRes;
+    RunBOAstGrid(_tempAgentGrids[ri], _vo[ri], _vd[ri], 60.0, _agentCosts[ri], ncs, ecs, &boaRes);
+    std::set< std::vector<long> > A, B;
+    for (const auto& itc : lowRes.costs) { std::vector<long> v; for (auto x : itc.second) v.push_back(x); A.insert(v); }
+    for (const auto& itc : boaRes.costs) { std::vector<long> v; for (auto x : itc.second) v.push_back(x); B.insert(v); }
+    if (A != B) {
+      std::cerr << "*** LOWLEVEL MISMATCH agent " << ri << " emoa=" << A.size() << " boa=" << B.size() << " cstrs:";
+      for (auto c : cstrs) std::cerr << " (" << c->vi << "," << c->vj << "," << c->ta << ")";
+      std::cerr << std::endl;
+    }
+  }
+  if (getenv("H1_CHECK")) {   // self-check of the single-objective bound (off unless H1_CHECK is set)
+    for (size_t o = 0; o < _cdim; o++) {
+      long mn = 1000000000L;
+      for (const auto& itc : lowRes.costs) { if (itc.second[o] < mn) mn = itc.second[o]; }
+      long sc = _SingleObjCheapestPath(ri, o, cstrs);
+      if (sc > mn) {
+        std::cerr << "*** BOUND VIOLATION agent " << ri << " obj " << o << ": bound search says "
+                  << sc << " but the low-level planner found " << mn << std::endl;
+      }
+    }
+  }
   if (!lowFlag || lowRes.paths.empty()) {
     return 0;
   }
